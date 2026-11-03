@@ -207,6 +207,18 @@ impl UsbHid {
         }
     }
 
+    /// Raw 64-byte reports of the vendor HID interface (`generic-hid` builds).
+    /// They travel on the same deferred raw-report channel as FIDO reports,
+    /// locked to the first process that uses it.
+    pub fn hid_wait_incoming(&self) -> Result<[u8; 64], xous::Error> {
+        self.u2f_wait_incoming().map(|r| r.packet)
+    }
+
+    /// Send one 64-byte report on the vendor HID interface (`generic-hid` builds).
+    pub fn hid_send(&self, report: [u8; 64]) -> Result<(), xous::Error> {
+        self.u2f_send(RawFidoReport { packet: report })
+    }
+
     pub fn u2f_send(&self, msg: RawFidoReport) -> Result<(), xous::Error> {
         let mut req = U2fMsgIpc { data: [0; 64], code: U2fCode::Tx, timeout_ms: None };
         req.data.copy_from_slice(&msg.packet);

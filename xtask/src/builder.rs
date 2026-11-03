@@ -1175,7 +1175,7 @@ impl Builder {
 
             // ------ build "detached" apps ------
             if self.board == "board-dabao" {
-                let detached_app_path = self.builder(
+                let mut detached_app_path = self.builder(
                     &self.apps,
                     &self.detached_app_features,
                     &self.target.as_deref(),
@@ -1183,6 +1183,8 @@ impl Builder {
                     &[],
                     false,
                 )?;
+                // prebuilt app binaries (given as paths) go into the detached image too
+                detached_app_path.append(&mut Self::binary_files_of(&self.apps));
                 self.create_detached_image(&detached_app_path)?;
             }
 
@@ -1226,7 +1228,12 @@ impl Builder {
 
             // ---------- install any pre-built packages ----------
             services_path.append(&mut self.fetch_prebuilds()?);
-            services_path.append(&mut self.enumerate_binary_files()?);
+            if self.board == "board-dabao" {
+                // apps live in the detached image on dabao
+                services_path.append(&mut Self::binary_files_of(&self.services));
+            } else {
+                services_path.append(&mut self.enumerate_binary_files()?);
+            }
 
             // --------- package up and sign a binary image ----------
             let (inie, inif, inis) = self.split_region(services_path.clone());
@@ -1626,6 +1633,13 @@ impl Builder {
             }
         }
         Ok(paths)
+    }
+
+    fn binary_files_of(specs: &[CrateSpec]) -> Vec<String> {
+        specs
+            .iter()
+            .filter_map(|s| if let CrateSpec::BinaryFile(_, path, _) = s { Some(path.clone()) } else { None })
+            .collect()
     }
 
     fn enumerate_binary_files(&self) -> Result<Vec<String>, DynError> {

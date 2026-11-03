@@ -7284,6 +7284,7 @@ dependencies = [
  "bao1x-hal",
  "bao1x-hal-service",
  "frunk_core",
+ "fugit",
  "locales",
  "log",
  "num-derive 0.4.2",

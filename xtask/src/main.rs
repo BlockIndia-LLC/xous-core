@@ -425,6 +425,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // .add_feature("test-rekey")
                 .add_apps(&get_cratespecs());
         }
+        Some("dabao-emu") => {
+            // dabao (no screen) apps on the host, e.g. the Ethereum burner: only the base
+            // services; apps talk to the host over their own sockets
+            builder.target_hosted().add_services(&["xous-ticktimer", "xous-log", "xous-names"]).add_apps(&get_cratespecs());
+        }
         Some("baosec-emu") => {
             let bao_pkgs = [
                 "xous-ticktimer",
@@ -1196,6 +1201,7 @@ Hardware images:
 Hosted emulation:
  run                     Run user image in hosted mode with release flags. [cratespecs] are apps
  baosec-emu              Run user image in hosted mode but for the baosec target
+ dabao-emu               Run dabao apps (no screen) in hosted mode with only the base services
  pddb-ci                 PDDB config for CI testing (eg: TRNG->deterministic for reproducible errors). [cratespecs] ignored.
  pddb-btest              PDDB stress tester for secret basis creation/deletion [cratespecs] ignored.
  pddb-fs-ci              Renode image with the on-target PDDB std::fs test runner (smalldb). [cratespecs] are services

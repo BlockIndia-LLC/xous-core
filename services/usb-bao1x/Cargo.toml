@@ -30,6 +30,7 @@ rkyv = { version = "0.8.8", default-features = false, features = [
 packed_struct = { version = "0.10", default-features = false } # used by the xous-usb-hid crate
 locales = { path = "../../locales" }
 frunk_core = "0.4.2"
+fugit = "0.3.7"
 # for debugging interrupts
 riscv = { version = "0.5.6", package = "xous-riscv" }
 
@@ -67,6 +68,10 @@ precursor = ["utralib/precursor", "utralib/std"]
 hosted = ["utralib/hosted", "utralib/std"]
 renode = ["utralib/renode", "utralib/std"]
 mass-storage = []
+# A single vendor-defined HID interface (64-byte reports) instead of the
+# keyboard + FIDO + CDC serial composite. Reports use the raw-report IPC path
+# (`UsbHid::hid_wait_incoming` / `hid_send`). No USB console or log mirror.
+generic-hid = []
 debug-print-usb = [
     "bao1x-hal/debug-print-duart",
 ] # mutually exclusive feature with other crates that use the app UART

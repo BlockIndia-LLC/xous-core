@@ -10,6 +10,7 @@ use num_traits::*;
 use usb_device::class_prelude::*;
 use usb_device::device::UsbDevice;
 use usb_device::prelude::*;
+#[cfg(not(feature = "generic-hid"))]
 use usbd_serial::SerialPort;
 use utralib::{AtomicCsr, utra};
 use xous::Message;
@@ -18,6 +19,7 @@ use xous_usb_hid::device::fido::RawFido;
 use xous_usb_hid::device::fido::RawFidoConfig;
 use xous_usb_hid::device::fido::RawFidoReport;
 use xous_usb_hid::device::keyboard::KeyboardLedsReport;
+#[cfg(not(feature = "generic-hid"))]
 use xous_usb_hid::device::keyboard::{NKROBootKeyboard, NKROBootKeyboardConfig};
 use xous_usb_hid::page::Keyboard;
 use xous_usb_hid::prelude::UsbHidClass;
@@ -27,6 +29,38 @@ use crate::api::Opcode;
 
 /// Maximum packet size for serial - tied to the speed of the port (HS)
 pub const SERIAL_MAX_PACKET_SIZE: usize = 512;
+
+/// HID classes exposed: keyboard + FIDO normally, a single raw vendor HID
+/// interface in `generic-hid` mode.
+#[cfg(not(feature = "generic-hid"))]
+pub type HidClasses<'a> = frunk_core::hlist::HCons<
+    RawFido<'a, CorigineWrapper>,
+    frunk_core::hlist::HCons<NKROBootKeyboard<'a, CorigineWrapper>, frunk_core::hlist::HNil>,
+>;
+#[cfg(feature = "generic-hid")]
+pub type HidClasses<'a> = frunk_core::hlist::HCons<RawFido<'a, CorigineWrapper>, frunk_core::hlist::HNil>;
+
+/// Vendor-defined HID: one 64-byte input and one 64-byte output report.
+#[cfg(feature = "generic-hid")]
+#[rustfmt::skip]
+pub const VENDOR_REPORT_DESCRIPTOR: &[u8] = &[
+    0x06, 0x00, 0xFF, // Usage Page (Vendor Defined 0xFF00)
+    0x09, 0x01,       // Usage (1)
+    0xA1, 0x01,       // Collection (Application)
+    0x09, 0x02,       //   Usage (2): data in
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x26, 0xFF, 0x00, //   Logical Maximum (255)
+    0x75, 0x08,       //   Report Size (8)
+    0x95, 0x40,       //   Report Count (64)
+    0x81, 0x02,       //   Input (Data, Variable, Absolute)
+    0x09, 0x03,       //   Usage (3): data out
+    0x15, 0x00,       //   Logical Minimum (0)
+    0x26, 0xFF, 0x00, //   Logical Maximum (255)
+    0x75, 0x08,       //   Report Size (8)
+    0x95, 0x40,       //   Report Count (64)
+    0x91, 0x02,       //   Output (Data, Variable, Absolute)
+    0xC0,             // End Collection
+];
 
 #[repr(align(32))]
 pub struct Bao1xUsb<'a> {
@@ -38,16 +72,10 @@ pub struct Bao1xUsb<'a> {
     pub irq_req: Option<UsbIrqReq>,
     pub wrapper: CorigineWrapper,
     pub device: UsbDevice<'a, CorigineWrapper>,
-    pub class: UsbHidClass<
-        'a,
-        CorigineWrapper,
-        frunk_core::hlist::HCons<
-            RawFido<'a, CorigineWrapper>,
-            frunk_core::hlist::HCons<NKROBootKeyboard<'a, CorigineWrapper>, frunk_core::hlist::HNil>,
-        >,
-    >,
+    pub class: UsbHidClass<'a, CorigineWrapper, HidClasses<'a>>,
     // storage for hid_packets to expatriate from the interrupt handler
     pub hid_packet: VecDeque<[u8; 64]>,
+    #[cfg(not(feature = "generic-hid"))]
     pub serial_port: SerialPort<'a, CorigineWrapper, [u8; 1024], [u8; 1024]>,
     // holds one HS packet - must be statically allocated in IRQ handler. Valid length is
     // passed as part of the interrupt recovery message.
@@ -69,14 +97,33 @@ impl<'a> Bao1xUsb<'a> {
         usb_alloc: &'a UsbBusAllocator<CorigineWrapper>,
         serial_number: &'a String,
     ) -> Self {
+        #[cfg(not(feature = "generic-hid"))]
         let class = UsbHidClassBuilder::new()
             .add_device(NKROBootKeyboardConfig::default())
             .add_device(RawFidoConfig::default())
             .build(usb_alloc);
+        // The raw 64-byte report device of the FIDO class, with a vendor descriptor.
+        #[cfg(feature = "generic-hid")]
+        let class = {
+            use fugit::ExtU32;
+            use xous_usb_hid::usb_class::prelude::InterfaceBuilder;
+            let interface = InterfaceBuilder::new(VENDOR_REPORT_DESCRIPTOR)
+                .unwrap()
+                .description("vendor HID")
+                .in_endpoint(5.millis())
+                .unwrap()
+                .with_out_endpoint(5.millis())
+                .unwrap()
+                .build();
+            UsbHidClassBuilder::new().add_device(RawFidoConfig::new(interface)).build(usb_alloc)
+        };
 
-        let rx_buf = [0u8; SERIAL_MAX_PACKET_SIZE * 2];
-        let tx_buf = [0u8; SERIAL_MAX_PACKET_SIZE * 2];
-        let serial_port = SerialPort::new_with_store(&usb_alloc, rx_buf, tx_buf);
+        #[cfg(not(feature = "generic-hid"))]
+        let serial_port = {
+            let rx_buf = [0u8; SERIAL_MAX_PACKET_SIZE * 2];
+            let tx_buf = [0u8; SERIAL_MAX_PACKET_SIZE * 2];
+            SerialPort::new_with_store(&usb_alloc, rx_buf, tx_buf)
+        };
         // HACK ALERT: due to a shortcoming in the usb-device implementation, inside the interrupt handler we
         // have to catch and parse SETUP-OUT sequences. Basically the driver assumes that the OUT endpoint is
         // always configured to trigger, but in our stack every time we have an OUT on EP0, we have to
@@ -94,10 +141,13 @@ impl<'a> Bao1xUsb<'a> {
         let product = "Baosec";
         #[cfg(feature = "board-baosec")]
         let pid = 0x6198;
-        #[cfg(feature = "board-dabao")]
+        #[cfg(all(feature = "board-dabao", not(feature = "generic-hid")))]
         let product = "Dabao";
+        #[cfg(all(feature = "board-dabao", feature = "generic-hid"))]
+        let product = "Dabao HID";
         #[cfg(feature = "board-dabao")]
         let pid = 0x6197;
+        #[cfg(not(feature = "generic-hid"))]
         let device = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x1d50, pid))
             .manufacturer("Baochip")
             .product(product)
@@ -105,6 +155,17 @@ impl<'a> Bao1xUsb<'a> {
             // this is *required* by the corigine stack
             .max_packet_size_0(64)
             .composite_with_iads()
+            .build();
+        // Single interface, so no IADs. A different release number keeps hosts
+        // from reusing the cached descriptors of the composite configuration.
+        #[cfg(feature = "generic-hid")]
+        let device = UsbDeviceBuilder::new(&usb_alloc, UsbVidPid(0x1d50, pid))
+            .manufacturer("Baochip")
+            .product(product)
+            .serial_number(&serial_number)
+            .device_release(0x0200)
+            // this is *required* by the corigine stack
+            .max_packet_size_0(64)
             .build();
 
         Bao1xUsb {
@@ -119,6 +180,7 @@ impl<'a> Bao1xUsb<'a> {
             kbd_tx_queue: RefCell::new(VecDeque::new()),
             irq_req: None,
             hid_packet: VecDeque::with_capacity(4),
+            #[cfg(not(feature = "generic-hid"))]
             serial_port,
             serial_rx: [0u8; SERIAL_MAX_PACKET_SIZE],
             double_lock: AtomicBool::new(false),
@@ -208,6 +270,16 @@ impl<'a> Bao1xUsb<'a> {
     /// Pending interrupt events are not cleared here. An event raised while
     /// the interrupt is masked remains pending and is processed after the
     /// previous interrupt-enable state is restored.
+    #[cfg(feature = "generic-hid")]
+    pub fn serial_write_irq_safe(&mut self, data: &[u8]) -> usb_device::Result<usize> {
+        // no CDC interface in this mode: console and log output are dropped
+        Ok(data.len())
+    }
+
+    #[cfg(feature = "generic-hid")]
+    pub fn serial_flush_irq_safe(&mut self) -> usb_device::Result<()> { Ok(()) }
+
+    #[cfg(not(feature = "generic-hid"))]
     pub fn serial_write_irq_safe(&mut self, data: &[u8]) -> usb_device::Result<usize> {
         // IRQARRAY1 is currently dedicated to the Corigine USB implementation,
         // so this code assumes there are no concurrent writers to EV_ENABLE.
@@ -230,6 +302,7 @@ impl<'a> Bao1xUsb<'a> {
 
     /// Flushes the USB CDC serial transmit buffer without allowing the USB
     /// interrupt handler to access the same `usbd-serial` state concurrently.
+    #[cfg(not(feature = "generic-hid"))]
     pub fn serial_flush_irq_safe(&mut self) -> usb_device::Result<()> {
         let previous_enable = self.irq_csr.r(utra::irqarray1::EV_ENABLE);
 
@@ -328,8 +401,14 @@ pub(crate) fn composite_handler(_irq_no: usize, arg: *mut usize) {
 
                 let device = usb.device.borrow_mut();
                 let class = usb.class.borrow_mut();
+                #[cfg(not(feature = "generic-hid"))]
                 let serial = usb.serial_port.borrow_mut();
-                if device.poll(&mut [class, serial as &mut dyn UsbClass<_>]) {
+                #[cfg(not(feature = "generic-hid"))]
+                let polled = device.poll(&mut [class, serial as &mut dyn UsbClass<_>]);
+                #[cfg(feature = "generic-hid")]
+                let polled = device.poll(&mut [class as &mut dyn UsbClass<_>]);
+                if polled {
+                    #[cfg(not(feature = "generic-hid"))]
                     if let Ok(count) = serial.read(&mut usb.serial_rx) {
                         xous::try_send_message(
                             usb.conn,
@@ -337,6 +416,7 @@ pub(crate) fn composite_handler(_irq_no: usize, arg: *mut usize) {
                         )
                         .ok();
                     }
+                    #[cfg(not(feature = "generic-hid"))]
                     match class.device::<NKROBootKeyboard<_>, _>().read_report() {
                         Ok(l) => {
                             usb.led_state = l;
@@ -411,6 +491,12 @@ pub(crate) fn composite_handler(_irq_no: usize, arg: *mut usize) {
                 }
                 usb.irq_serviced.store(true, Ordering::SeqCst);
             }
+            #[cfg(feature = "generic-hid")]
+            Some(UsbIrqReq::KbdTx) => {
+                // no keyboard interface in this mode
+                usb.kbd_tx_queue.borrow_mut().clear();
+            }
+            #[cfg(not(feature = "generic-hid"))]
             Some(UsbIrqReq::KbdTx) => {
                 let keyboard = composite.device::<NKROBootKeyboard<'_, _>, _>();
                 usb.kbd_tx_queue.borrow_mut().make_contiguous();

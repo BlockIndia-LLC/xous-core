@@ -20,8 +20,14 @@ fn main() -> ! {
     #[cfg(feature = "board-baosec")]
     let keys_sid = xns.register_name(SERVER_NAME_KEYS, Some(5)).expect("can't register server");
 
+    // one client, trust on first use: for a Dabao image whose only keystore user is one
+    // application process, which connects at boot. Nothing that starts or is taken over
+    // later can get a connection.
+    #[cfg(all(not(feature = "board-baosec"), feature = "single-client"))]
+    let keys_sid = xns.register_name(SERVER_NAME_KEYS, Some(1)).expect("can't register server");
+
     // permissive default for e.g. Dabao
-    #[cfg(not(feature = "board-baosec"))]
+    #[cfg(all(not(feature = "board-baosec"), not(feature = "single-client")))]
     let keys_sid = xns.register_name(SERVER_NAME_KEYS, None).expect("can't register server");
 
     platform::keystore(keys_sid);
